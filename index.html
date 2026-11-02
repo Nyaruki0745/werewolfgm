@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>人狼GM</title>
+<style>
+:root{--bg:#eef1f4;--fg:#1b2330;--card:#dde3ea;--ac:#2d4a7a;--mut:#667386}
+body[data-p=night]{--bg:#12131f;--fg:#e6e3f0;--card:#1d1f33;--ac:#b83a4b;--mut:#8d8fab}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.7 system-ui,"Hiragino Sans",sans-serif;transition:background .8s,color .8s}
+main{max-width:520px;margin:auto;padding:16px 16px 80px}
+h1,h2{font-family:"Yu Mincho","Hiragino Mincho ProN",serif;margin:.4em 0}
+.card{background:var(--card);border-radius:10px;padding:10px 14px;margin:10px 0}
+button{font:inherit;border:0;border-radius:8px;padding:9px 14px;margin:3px;background:var(--ac);color:#fff}
+button.o{background:none;color:var(--fg);box-shadow:inset 0 0 0 2px var(--mut)}
+button.on::before{content:"✓ "}
+button:disabled{opacity:.35}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--ac);outline-offset:2px}
+input,select{font:inherit;padding:7px;border-radius:8px;border:1px solid var(--mut);background:var(--bg);color:var(--fg);max-width:100%}
+label{display:inline-block;margin:2px 8px 2px 0}
+.mut{color:var(--mut);font-size:.9em}.dead{text-decoration:line-through;opacity:.5}
+[hidden]{display:none!important}
+#toast{position:fixed;left:12px;right:12px;bottom:12px;max-width:496px;margin:auto}
+</style></head>
+<body><main id="app"></main><div id="toast" class="card" hidden></div>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+'use strict';
+/* ================= 拡張ポイント =================
+ ROLES    : 役職。night に KINDS のキーを書くと夜の行動を持つ
+ KINDS    : 夜の行動の種類(order順に処理)。新しい行動はここに追加
+ SETTINGS : 設定項目。ロビー画面に自動で表示される
+ WINS     : 勝利条件の上書き(先頭ほど優先)
+ ================================================ */
+const TEAMS={village:'市民陣営',wolf:'人狼陣営',fox:'妖狐',lover:'恋人',teru:'てるてる'};
+const ROLES={
+ villager:{name:'市民',team:'village',seer:'白',medium:'白'},
+ werewolf:{name:'人狼',team:'wolf',wolf:1,know:1,seer:'黒',medium:'黒',night:'attack'},
+ seer:{name:'占い師',team:'village',seer:'白',medium:'白',night:'divine'},
+ medium:{name:'霊媒師',team:'village',seer:'白',medium:'白',mediumSee:1},
+ knight:{name:'騎士',team:'village',seer:'白',medium:'白',night:'guard'},
+ madman:{name:'狂人',team:'wolf',seer:'白',medium:'白'},
+ teruteru:{name:'てるてる',team:'teru',seer:'白',medium:'白',execWin:1},
+ lover:{name:'恋人',team:'lover',know:1,seer:'白',medium:'白'},
+ fox:{name:'妖狐',team:'fox',seer:'白',medium:'白',curse:1,immune:1}
+};
+const SETTINGS=[
+ {k:'wolfKills',l:'人狼が1晩に殺せる人数',t:'num',d:1,min:1,max:3},
+ {k:'knightConsec',l:'騎士の連続守護',t:'bool',d:false},
+ {k:'knightSelf',l:'騎士の自己守護',t:'bool',d:false},
+ {k:'loverFollow',l:'恋人の道連れ',t:'bool',d:true},
+ {k:'noFirstKill',l:'初日の襲撃なし',t:'bool',d:false},
+ {k:'tie',l:'同票のとき',t:'sel',d:'none',o:{none:'誰も処刑しない',random:'ランダムで1人処刑'}}
+];
+const alive=G=>G.players.filter(p=>p.alive),P=(G,id)=>G.players.find(p=>p.id===id);
+const KINDS={
+ guard:{order:1,l:'守る相手',n:()=>1,
+  targets:(G,me)=>alive(G).filter(p=>(G.set.knightSelf||p.id!==me.id)&&(G.set.knightConsec||G.lastGuard[me.id]!==p.id)).map(p=>p.id),
+  apply(G,c,me,sel){G.lastGuard[me.id]=sel[0]||null;if(sel[0])c.guard.add(sel[0])}},
+ attack:{order:2,l:'襲撃する相手',n:G=>G.set.wolfKills,
+  targets:G=>alive(G).filter(p=>!ROLES[p.role].wolf).map(p=>p.id),
+  apply(G,c,me,sel){sel.forEach(t=>c.atk[t]=(c.atk[t]||0)+1)},
+  fin(G,c){if(G.day===1&&G.set.noFirstKill)return;
+   shuffle(Object.keys(c.atk)).sort((a,b)=>c.atk[b]-c.atk[a]).slice(0,G.set.wolfKills)
+    .forEach(t=>{if(!c.guard.has(t)&&!ROLES[P(G,t).role].immune)die(G,t,c)})}},
+ divine:{order:3,l:'占う相手',n:()=>1,
+  targets:(G,me)=>alive(G).filter(p=>p.id!==me.id).map(p=>p.id),
+  apply(G,c,me,sel){const t=P(G,sel[0]);if(!t)return;
+   note(G,me.id,`${G.day}日目の夜の占い結果: ${t.name} は【${ROLES[t.role].seer}】`);
+   if(ROLES[t.role].curse)die(G,t.id,c)}}
+};
+const WINS=[ // (G,生存者,基本勝者'village'|'wolf'|null) → 勝者 or null
+ (G,a,b)=>b&&a.filter(p=>p.role==='lover').length>=2?'lover':null, // 終了時に恋人2人とも生存
+ (G,a,b)=>b&&a.some(p=>p.role==='fox')?'fox':null                   // 終了時に妖狐が生存
+];
+function checkWin(G){const a=alive(G);if(!a.length)return'draw';
+ const w=a.filter(p=>ROLES[p.role].wolf).length,b=w===0?'village':w>=a.length-w?'wolf':null;
+ for(const f of WINS){const r=f(G,a,b);if(r)return r}return b}
+
+/* ================= ゲームエンジン(通信と無関係) ================= */
+const shuffle=a=>{for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}return a};
+const note=(G,id,s)=>(G.notes[id]=G.notes[id]||[]).push(s), pub=(G,s)=>G.log.push(s);
+function die(G,id,c){const p=P(G,id);if(!p||!p.alive)return;p.alive=false;c.dead.push(id);
+ if(G.set.loverFollow&&p.role==='lover')G.players.filter(q=>q.alive&&q.role==='lover').forEach(q=>die(G,q.id,c))}
+function need(G,me){const k=ROLES[me.role].night;if(!k||!KINDS[k])return{k:null,t:[],n:0};
+ const K=KINDS[k],t=K.targets(G,me);return{k,l:K.l,t,n:Math.min(K.n(G),t.length)}}
+function begin(G){let rs=[];for(const r in G.counts)rs.push(...Array(G.counts[r]).fill(r));
+ while(rs.length<G.players.length)rs.push('villager');shuffle(rs);
+ G.players.forEach((p,i)=>{p.role=rs[i];p.alive=true});
+ Object.assign(G,{phase:'night',day:1,night:{},votes:{},notes:{},log:[],lastGuard:{},winner:null})}
+function resolveNight(G){
+ const c={guard:new Set(),dead:[],atk:{}},acts=Object.entries(G.night);
+ for(const k of Object.keys(KINDS).sort((a,b)=>KINDS[a].order-KINDS[b].order)){
+  for(const[pid,sel]of acts){const me=P(G,pid);if(ROLES[me.role].night===k)KINDS[k].apply(G,c,me,sel)}
+  if(KINDS[k].fin)KINDS[k].fin(G,c)}
+ pub(G,c.dead.length?`${G.day}日目の朝: ${c.dead.map(i=>P(G,i).name).join('、')} が死亡しました`:`${G.day}日目の朝: 昨夜は誰も死亡しませんでした`);
+ G.night={};G.winner=checkWin(G);G.phase=G.winner?'end':'day'}
+function tally(G){
+ const cnt={};Object.values(G.votes).forEach(t=>cnt[t]=(cnt[t]||0)+1);
+ const mx=Math.max(...Object.values(cnt)),top=Object.keys(cnt).filter(k=>cnt[k]===mx);
+ pub(G,`${G.day}日目 投票: `+Object.entries(G.votes).map(([a,b])=>`${P(G,a).name}→${P(G,b).name}`).join('、'));
+ const id=top.length===1?top[0]:G.set.tie==='random'?top[Math.floor(Math.random()*top.length)]:null;
+ if(!id)pub(G,'同票のため誰も処刑されませんでした');
+ else{const p=P(G,id),c={dead:[]};die(G,id,c);pub(G,`${p.name} が処刑されました`);
+  c.dead.slice(1).forEach(i=>pub(G,`${P(G,i).name} も後を追って死亡しました`));
+  G.players.filter(q=>q.alive&&ROLES[q.role].mediumSee).forEach(q=>note(G,q.id,`${G.day}日目に処刑された ${p.name} は【${ROLES[p.role].medium}】`));
+  if(ROLES[p.role].execWin)G.winner=ROLES[p.role].team}
+ G.winner=G.winner||checkWin(G);G.votes={};G.night={};
+ if(G.winner)G.phase='end';else{G.day++;G.phase='night'}}
+function act(G,pid,a){ // 戻り値: エラー文字列(任意)
+ const me=P(G,pid);if(!me)return;const H=pid===G.host,ph=G.phase;
+ if(H&&ph==='lobby'&&a.k==='cfg'){G.set=a.set;G.counts=a.counts}
+ else if(H&&ph==='lobby'&&a.k==='start'){
+  const n=G.players.length,c=G.counts,x=Object.values(c).reduce((s,v)=>s+v,0);
+  if(n<3)return'3人以上必要です';if(x>n)return'役職の合計が人数を超えています';
+  if(!c.werewolf)return'人狼が0人です';if(c.lover&&c.lover!==2)return'恋人は0人か2人にしてください';
+  begin(G)}
+ else if(H&&ph==='end'&&a.k==='again'){G.phase='lobby';G.log=[];G.notes={};G.players.forEach(p=>{p.alive=true;delete p.role})}
+ else if(H&&ph==='day'&&a.k==='tovote'){G.phase='vote';G.votes={}}
+ else if(me.alive&&ph==='night'&&a.k==='night'){
+  const nd=need(G,me),sel=[...new Set(a.sel||[])].filter(x=>nd.t.includes(x));
+  if(sel.length!==nd.n)return;G.night[pid]=sel;
+  if(alive(G).every(p=>G.night[p.id]))resolveNight(G)}
+ else if(me.alive&&ph==='vote'&&a.k==='vote'){
+  const t=P(G,a.to);if(!t||!t.alive||t.id===pid)return;G.votes[pid]=t.id;
+  if(alive(G).every(p=>G.votes[p.id]))tally(G)}}
+function view(G,pid){ // 各プレイヤーに見せてよい情報だけ
+ const me=P(G,pid),r=ROLES[me.role]||{},ph=G.phase;
+ const v={phase:ph,day:G.day,code:G.code,host:pid===G.host,set:G.set,counts:G.counts,log:G.log,winner:G.winner,
+  players:G.players.map(p=>({id:p.id,name:p.name,alive:p.alive,role:ph==='end'?p.role:null}))};
+ if(ph!=='lobby'){
+  Object.assign(v,{role:me.role,alive:me.alive,notes:G.notes[pid]||[],
+   mates:r.know?G.players.filter(p=>p.role===me.role&&p.id!==pid).map(p=>p.name):[]});
+  const wait=alive(G).filter(p=>!(ph==='night'?G.night:G.votes)[p.id]).length;
+  if(ph==='night'&&me.alive)Object.assign(v,{need:need(G,me),sent:G.night[pid],wait});
+  if(ph==='vote'&&me.alive)Object.assign(v,{need:{k:'vote',l:'処刑する人',n:1,t:alive(G).filter(p=>p.id!==pid).map(p=>p.id)},sent:G.votes[pid],wait})}
+ return v}
+
+/* ================= 通信(PeerJS: ホストの端末がサーバー役) ================= */
+let G,V,peer,conn,myId,conns={},ui={sel:[]};
+const ID='jgm7x-',$=s=>document.querySelector(s),app=$('#app');
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function toast(m){const e=$('#toast');e.textContent=m;e.hidden=false;clearTimeout(toast.t);toast.t=setTimeout(()=>e.hidden=true,3500)}
+function broadcast(){sessionStorage.setItem('wwH',JSON.stringify(G));
+ G.players.forEach(p=>{const c=conns[p.id];if(c&&c.open)c.send({t:'v',v:view(G,p.id)})});
+ V=view(G,myId);render()}
+function send(a){if(G){const e=act(G,myId,a);if(e)toast(e);broadcast()}else if(conn)conn.send({t:'a',a})}
+function hostGame(name,saved){
+ const code=saved?saved.code:String(1000+Math.floor(Math.random()*9000));
+ peer=new Peer(ID+code);
+ peer.on('open',()=>{G=saved||{code,host:'p0',phase:'lobby',players:[{id:'p0',name,alive:true}],
+  set:Object.fromEntries(SETTINGS.map(o=>[o.k,o.d])),counts:{werewolf:1,seer:1},notes:{},log:[]};myId=G.host;broadcast()});
+ peer.on('connection',c=>{let pid;c.on('data',m=>{
+  if(m.t==='join'){let p=m.id&&P(G,m.id);
+   if(!p){if(G.phase!=='lobby')return c.send({t:'err',m:'ゲームはすでに始まっています'});
+    let nm=String(m.name).slice(0,12);while(G.players.some(q=>q.name===nm))nm+='*';
+    p={id:'p'+G.players.length,name:nm,alive:true};G.players.push(p)}
+   pid=p.id;conns[pid]=c;c.send({t:'id',id:pid});broadcast()}
+  else if(m.t==='a'&&pid){act(G,pid,m.a);broadcast()}})});
+ peer.on('error',e=>{if(e.type==='unavailable-id')setTimeout(()=>{peer.destroy();hostGame(name,saved)},saved?3000:0);
+  else toast('接続エラー: '+e.type)})}
+function joinGame(code,name,id){
+ if(peer)peer.destroy();peer=new Peer();
+ peer.on('open',()=>{conn=peer.connect(ID+code,{reliable:true});
+  conn.on('open',()=>conn.send({t:'join',name,id}));
+  conn.on('data',m=>{
+   if(m.t==='id'){id=myId=m.id;sessionStorage.setItem('ww',JSON.stringify({code,name,id}))}
+   else if(m.t==='v'){V=m.v;render()}
+   else if(m.t==='err'){toast(m.m);sessionStorage.removeItem('ww')}});
+  conn.on('close',()=>{toast('切断されました。再接続します…');setTimeout(()=>joinGame(code,name,id),3000)})});
+ peer.on('error',e=>{toast(e.type==='peer-unavailable'?'部屋が見つかりません':'接続エラー: '+e.type);
+  if(id)setTimeout(()=>joinGame(code,name,id),3000)})}
+function leave(){if(confirm('退出しますか?(ホストの場合、ゲームは終了します)')){sessionStorage.clear();location.reload()}}
+
+/* ================= 画面 ================= */
+const PH={lobby:'ロビー',night:'夜',day:'昼(議論)',vote:'投票',end:'終了'};
+function title(){app.innerHTML=`<h1>人狼GM</h1><p class="mut">議論は対面で。夜の行動と判定はこのアプリが担当します。</p>
+<div class="card"><input id="nm" placeholder="名前" maxlength="12"></div>
+<div class="card"><button onclick="go('h')">部屋を作る</button><br>
+<input id="cd" placeholder="部屋コード" inputmode="numeric" style="width:8em"><button onclick="go('j')">参加する</button></div>`}
+function go(w){const nm=$('#nm').value.trim();if(!nm)return toast('名前を入力してください');
+ if(w==='h')hostGame(nm);else{const c=$('#cd').value.trim();if(!c)return toast('部屋コードを入力してください');joinGame(c,nm)}}
+function cfg(w,k,v){const set={...V.set},counts={...V.counts};if(w==='s')set[k]=v;else counts[k]=Math.max(0,+v||0);send({k:'cfg',set,counts})}
+function tog(id,n){const i=ui.sel.indexOf(id);if(i<0){ui.sel.push(id);if(ui.sel.length>n)ui.sel.shift()}else ui.sel.splice(i,1);render()}
+function ok(){send(V.phase==='vote'?{k:'vote',to:ui.sel[0]}:{k:'night',sel:ui.sel})}
+const nmOf=id=>esc(V.players.find(p=>p.id===id).name);
+function setUI(o){const v=V.set[o.k];
+ return o.t==='bool'?`<label><input type="checkbox" ${v?'checked':''} onchange="cfg('s','${o.k}',this.checked)"> ${o.l}</label>`
+ :o.t==='num'?`<label>${o.l} <input type="number" min="${o.min}" max="${o.max}" value="${v}" style="width:3.5em" onchange="cfg('s','${o.k}',+this.value)"></label>`
+ :`<label>${o.l} <select onchange="cfg('s','${o.k}',this.value)">${Object.entries(o.o).map(([k,t])=>`<option value="${k}" ${v===k?'selected':''}>${t}</option>`).join('')}</select></label>`}
+function lobby(){
+ const n=V.players.length,cn=V.counts,sum=Object.values(cn).reduce((a,b)=>a+b,0);
+ let h=`<h1>部屋コード ${V.code}</h1><p class="mut">他の端末で「参加する」からこのコードを入力します。</p>
+ <div class="card"><b>参加者 ${n}人</b><br>${V.players.map(p=>esc(p.name)).join('、')}</div>`;
+ if(!V.host)return h+`<div class="card">${Object.keys(ROLES).map(k=>ROLES[k].name+(k==='villager'?Math.max(0,n-sum):cn[k]||0)).join(' ')}<br>
+  ${SETTINGS.map(o=>`${o.l}: ${o.t==='bool'?(V.set[o.k]?'あり':'なし'):o.t==='sel'?o.o[V.set[o.k]]:V.set[o.k]}`).join('<br>')}</div>
+  <p class="mut">ホストの開始を待っています…</p>`;
+ return h+`<div class="card"><b>役職の人数</b>(市民は残り全員)<br>`+Object.keys(ROLES).filter(k=>k!=='villager').map(k=>
+  `<label>${ROLES[k].name} <input type="number" min="0" max="9" value="${cn[k]||0}" style="width:3.5em" onchange="cfg('c','${k}',this.value)"></label>`).join('')+
+  `<br>市民: ${n-sum}人</div><div class="card"><b>ルール</b><br>${SETTINGS.map(setUI).join('<br>')}</div>
+  <button onclick="send({k:'start'})">ゲーム開始</button>`}
+function picker(){
+ const nd=V.need,v=V.phase==='vote';
+ if(V.sent&&!v)return`<div class="card">送信しました。他の人を待っています(あと${V.wait}人)</div>`;
+ return`<div class="card"><b>${nd.k?nd.l:'今夜、あなたにできる行動はありません'}${nd.k&&nd.n>1?`(${nd.n}人)`:''}</b><br>`
+  +nd.t.map(id=>`<button class="${ui.sel.includes(id)?'on':'o'}" onclick="tog('${id}',${nd.n})">${nmOf(id)}</button>`).join('')
+  +`<br><button ${ui.sel.length===nd.n?'':'disabled'} onclick="ok()">${v?'投票する':'決定'}</button>`
+  +(v&&V.sent?`<p class="mut">現在の投票先: ${nmOf(V.sent)}(変更できます)</p>`:'')+`<span class="mut">あと${V.wait}人</span></div>`}
+function game(){
+ const r=ROLES[V.role],end=V.phase==='end';
+ let h=`<div class="card"><b>${V.day}日目 ${PH[V.phase]}</b> `+(end?'':`<button class="o" onclick="ui.role=!ui.role;render()">役職を${ui.role?'隠す':'見る'}</button>`);
+ if(ui.role&&!end)h+=`<h2>${r.name}${V.alive?'':'(死亡)'}</h2><span class="mut">${TEAMS[r.team]}</span>`+(V.mates.length?`<br>仲間: ${V.mates.map(esc).join('、')}`:'');
+ h+='</div>';
+ if(end)h+=`<div class="card"><h2>${V.winner==='draw'?'全滅(引き分け)':TEAMS[V.winner]+'の勝利'}</h2>`+
+  V.players.map(p=>`${esc(p.name)}: ${ROLES[p.role].name}${p.alive?'':'(死亡)'}`).join('<br>')+`</div>`+(V.host?`<button onclick="send({k:'again'})">もう一度(ロビーへ)</button>`:'');
+ if(V.notes.length)h+=`<div class="card"><b>あなただけへの情報</b><br>${V.notes.map(esc).join('<br>')}</div>`;
+ if(V.phase==='day'&&V.host)h+=`<button onclick="send({k:'tovote'})">議論を終えて投票へ</button>`;
+ else if(!end&&!V.alive)h+=`<div class="card">あなたは死亡しています。発言や相談はできません。</div>`;
+ else if(V.phase==='day')h+=`<div class="card">議論中です。ホストが投票を始めます。</div>`;
+ else if(!end)h+=picker();
+ h+=`<div class="card"><b>参加者</b><br>${V.players.map(p=>`<span class="${p.alive?'':'dead'}">${esc(p.name)}</span>`).join(' ')}</div>
+ <div class="card"><b>経過</b><br>${V.log.length?[...V.log].reverse().map(esc).join('<br>'):'まだありません'}</div>`;
+ return h}
+function render(){
+ if(ui.key!==V.phase+V.day){ui.key=V.phase+V.day;ui.sel=[];ui.role=false}
+ document.body.dataset.p=V.phase;
+ app.innerHTML=(V.phase==='lobby'?lobby():game())+`<p class="mut"><a href="#" onclick="leave();return false">退出</a></p>`}
+
+app.innerHTML='<p>接続中…</p>';
+const SH=sessionStorage.getItem('wwH'),SJ=sessionStorage.getItem('ww');
+if(SH)hostGame(null,JSON.parse(SH));
+else if(SJ){const o=JSON.parse(SJ);joinGame(o.code,o.name,o.id)}
+else title();
+</script></body></html>
