@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#101827">
+  <meta name="description" content="スマートフォンで人狼ゲームの進行を管理するGMシステム">
+  <title>WEREWOLF GM</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="./" aria-label="WEREWOLF GM ホーム">
+        <span class="brand-mark">W</span>
+        <span><strong>WEREWOLF GM</strong><small>GAME MANAGEMENT SYSTEM</small></span>
+      </a>
+      <div class="top-actions">
+        <button id="recovery-toggle" class="button button-ghost" type="button" hidden>復帰コード</button>
+        <span id="connection-status" class="connection"><i></i>未接続</span>
+        <button id="settings-toggle" class="icon-button" type="button" title="接続設定" aria-label="接続設定">⚙</button>
+      </div>
+    </header>
+
+    <main id="app" class="main-content" aria-live="polite">
+      <section class="loading-panel"><div class="spinner"></div><p>起動しています…</p></section>
+    </main>
+
+    <footer class="footer">WEREWOLF GM <span>・</span> MVP 0.1.0 <span>・</span> ゲーム進行補助システム</footer>
+  </div>
+
+  <dialog id="settings-dialog" class="dialog">
+    <form method="dialog" id="api-settings-form" class="dialog-card">
+      <div class="dialog-heading"><div><p class="eyebrow">CONNECTION</p><h2>接続設定</h2></div><button class="icon-button" value="cancel" aria-label="閉じる">✕</button></div>
+      <label class="field-label" for="api-url">ゲームサーバー URL</label>
+      <input id="api-url" class="text-input" type="url" placeholder="https://xxxx-8787.app.github.dev" autocomplete="url">
+      <p class="hint">Codespacesの「Ports」から8787番ポートの転送URLをコピーして入力してください。末尾の / は不要です。</p>
+      <div class="dialog-actions"><button class="button button-primary" id="save-api-url" value="default">保存して接続</button></div>
+      <div id="api-test-result" class="inline-message" role="status"></div>
+    </form>
+  </dialog>
+
+
+  <dialog id="recovery-dialog" class="dialog">
+    <div class="dialog-card">
+      <div class="dialog-heading"><div><p class="eyebrow">ACCOUNT RECOVERY</p><h2>プレイヤー復帰コード</h2></div><button id="close-recovery" class="icon-button" type="button" aria-label="閉じる">✕</button></div>
+      <p class="hint">端末を変更したり、ブラウザの保存データを失った場合に使います。このコードは本人だけが保管してください。</p>
+      <div id="recovery-code-value" class="role-card" style="margin:15px 0;font-size:22px;letter-spacing:.18em;font-weight:900">未発行</div>
+      <button id="copy-recovery" class="button button-primary button-block" type="button">復帰コードをコピー</button>
+      <p class="hint">復帰コードを知っている人は、あなたのプレイヤー枠に再接続できます。ほかの人に共有しないでください。</p>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="./app.js" defer></script>
+</body>
+</html>
