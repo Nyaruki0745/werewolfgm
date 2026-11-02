@@ -1,0 +1,12 @@
+{
+  "name": "werewolf-gm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "GitHub Pages + GitHub Codespaces based Werewolf GM system",
+  "scripts": {
+    "start": "node server/index.mjs",
+    "test": "node --test"
+  },
+  "engines": { "node": ">=20" }
+}
